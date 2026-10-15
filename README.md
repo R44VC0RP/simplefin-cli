@@ -55,6 +55,7 @@ Set `SIMPLEFIN_AUTO_SYNC_HOURS` to change the 12 hours (values under 3 still wai
 - Never ask the user to paste a setup token or access URL into chat. If `status` says not connected, tell them to run `simplefin claim` themselves.
 - Read with the query tools; they're free. Auto-sync keeps data within 12 hours, so you rarely need `sync_now`. Never loop on it.
 - Amounts are signed strings: positive means money into the account, negative means money out. Card purchases are usually negative; check a known one before assuming.
+- Recurring detection only sees synced history (SimpleFIN provides 90 days, then the local database keeps growing). Monthly charges need two or more hits and yearly ones over a year of data, so say so when it matters. Check `confidence` before calling something a subscription.
 - Show Bridge errors (from `sync_status`) to the user. They usually mean a bank needs reconnecting at bridge.simplefin.org.
 
 ## MCP tools
@@ -65,6 +66,8 @@ Set `SIMPLEFIN_AUTO_SYNC_HOURS` to change the 12 hours (values under 3 still wai
 | `list_transactions` | Newest first. Filters: `account` (id or part of name), `since`/`until` (`YYYY-MM-DD` or `30d`), `search`, `min_amount`/`max_amount`, `pending`, `limit` |
 | `summarize_cash_flow` | Money in and out per account over a period |
 | `get_balance_history` | Balance recorded at each sync |
+| `find_recurring_charges` | Subscriptions, bills and installment fees that repeat: cadence, amount, monthly and yearly cost, next expected charge, confidence, and the total per month |
+| `top_merchants` | Spending by merchant, with names normalized across PayPal, Apple Pay and processor prefixes; transfers and card payments excluded |
 | `sync_status` | Last sync, requests used today, Bridge errors |
 | `sync_now` | Fetch from SimpleFIN. Refuses within an hour of the last sync |
 
@@ -80,6 +83,8 @@ simplefin transactions [--account chase] [--since 30d] [--until 2026-10-01]
                        [--search uber] [--min -500] [--max -100] [--pending] [--limit 100]
 simplefin summary [--since 30d] [--account chase]
 simplefin balances <account> [--since 90d]
+simplefin recurring [--all] [--income] [--since 2026-01-01]   # subscriptions and bills
+simplefin merchants [--since 30d] [--limit 20] [--transfers]  # spending by merchant
 simplefin logout                                 # removes the stored access URL
 simplefin mcp                                    # MCP server over stdio
 ```

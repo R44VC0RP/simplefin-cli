@@ -3,7 +3,7 @@ import getpass
 import json
 import sys
 
-from . import client, db, queries
+from . import client, db, queries, recurring
 from .client import sanitize
 from . import sync as sync_mod
 
@@ -133,6 +133,38 @@ def cmd_summary(args) -> int:
     return 0
 
 
+def cmd_recurring(args) -> int:
+    with db.session() as conn:
+        auto_sync(conn, args)
+        result = recurring.find_recurring(
+            conn, since=args.since, include_inactive=args.all, include_income=args.income
+        )
+
+    def render(r):
+        table(r["recurring"], [
+            ("merchant", "Merchant"), ("kind", "Kind"), ("cadence", "Every"), ("typical_amount", "Amount"),
+            ("monthly_cost", "Per month"), ("last_charged", "Last"), ("next_expected", "Next"),
+            ("confidence", "Confidence"), ("status", "Status"),
+        ])
+        print(f"\nActive total: {r['active_monthly_total']}/month, {r['active_yearly_total']}/year "
+              f"(history from {r['history_from']}).")
+
+    emit(result, args.json, render)
+    return 0
+
+
+def cmd_merchants(args) -> int:
+    with db.session() as conn:
+        auto_sync(conn, args)
+        result = recurring.top_merchants(
+            conn, since=args.since, until=args.until, limit=args.limit, include_transfers=args.transfers
+        )
+    emit(result, args.json, lambda r: table(r["merchants"], [
+        ("merchant", "Merchant"), ("spent", "Spent"), ("transactions", "Count"), ("average", "Average"),
+    ]))
+    return 0
+
+
 def cmd_status(args) -> int:
     with db.session() as conn:
         result = sync_mod.status(conn)
@@ -208,6 +240,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--since", default="30d")
     p.add_argument("--until")
     p.add_argument("--account")
+
+    p = add("recurring", cmd_recurring, "detect subscriptions and other recurring charges")
+    p.add_argument("--since", help="only consider history after this date")
+    p.add_argument("--all", action="store_true", help="include series that seem to have stopped")
+    p.add_argument("--income", action="store_true", help="include recurring deposits")
+    p.add_argument("--no-sync", action="store_true", help="don't auto-sync stale data first")
+
+    p = add("merchants", cmd_merchants, "spending by merchant, largest first")
+    p.add_argument("--since", default="30d")
+    p.add_argument("--until")
+    p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--transfers", action="store_true", help="include transfers and card payments")
+    p.add_argument("--no-sync", action="store_true", help="don't auto-sync stale data first")
 
     add("status", cmd_status, "connection, last sync and quota")
     add("logout", cmd_logout, "delete the stored access URL")

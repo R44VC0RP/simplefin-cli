@@ -2,7 +2,7 @@ import time
 
 from mcp.server.fastmcp import FastMCP
 
-from . import client, db, queries
+from . import client, db, queries, recurring
 from . import sync as sync_mod
 
 MIN_SYNC_INTERVAL = 3600
@@ -69,6 +69,40 @@ def summarize_cash_flow(since: str | None = "30d", until: str | None = None, acc
     """Total money in and out per account over a period, from posted transactions."""
     with db.session() as conn:
         return queries.summary(conn, since=since, until=until, account=account)
+
+
+@mcp.tool()
+def find_recurring_charges(
+    since: str | None = None,
+    include_inactive: bool = False,
+    include_income: bool = False,
+    min_occurrences: int = 2,
+) -> dict:
+    """Detect subscriptions, bills and other charges that repeat on a regular cadence.
+
+    Returns each series with merchant, kind (subscription, bill, installment plan fee), cadence,
+    typical amount, monthly and yearly cost, last and next expected charge, confidence and status,
+    plus the total monthly cost of active outflows. Card payments and transfers are excluded.
+    include_inactive adds series that seem to have stopped; include_income adds regular deposits.
+    Limited by synced history: yearly charges need over a year of data.
+    """
+    with db.session() as conn:
+        return recurring.find_recurring(
+            conn, since=since, min_occurrences=min_occurrences,
+            include_inactive=include_inactive, include_income=include_income,
+        )
+
+
+@mcp.tool()
+def top_merchants(
+    since: str | None = "30d", until: str | None = None, limit: int = 20, include_transfers: bool = False
+) -> dict:
+    """Spending grouped by merchant (names normalized across card networks and PayPal/Apple Pay
+    prefixes), largest first. Excludes pending charges, and transfers/card payments by default."""
+    with db.session() as conn:
+        return recurring.top_merchants(
+            conn, since=since, until=until, limit=limit, include_transfers=include_transfers
+        )
 
 
 @mcp.tool()
