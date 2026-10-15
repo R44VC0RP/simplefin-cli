@@ -1,5 +1,7 @@
 # simplefin-cli
 
+![simplefin CLI showing synced accounts and transactions](assets/hero.png)
+
 Read-only access to your bank, card and loan accounts through [SimpleFIN Bridge](https://bridge.simplefin.org), as a CLI and an MCP server for agents.
 
 Data is synced into a local SQLite database, and every query reads that copy. Only `sync` talks to SimpleFIN, which allows about 24 requests a day and disables access tokens that keep going over.
