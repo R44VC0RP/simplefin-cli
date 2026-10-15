@@ -1,6 +1,6 @@
 # simplefin-cli
 
-![simplefin CLI showing synced accounts and transactions](assets/hero.png)
+![simplefin CLI showing accounts, transactions and recurring charges](assets/hero.png)
 
 Read-only access to your bank, card and loan accounts through [SimpleFIN Bridge](https://bridge.simplefin.org), as a CLI and an MCP server for agents.
 
