@@ -13,7 +13,14 @@ mcp = FastMCP(
         "Read-only access to the user's bank, card and loan accounts, synced from SimpleFIN Bridge "
         "into a local database. Query tools read the local copy and are free to call. sync_now hits "
         "the Bridge, which allows only ~24 requests per day and updates about once a day, so call it "
-        "only when the data is stale (see sync_status). Amounts are strings; negative means money left "
+        "only when the data is stale (see sync_status). "
+        + (
+            f"The server also syncs by itself in the background when data is older than "
+            f"{sync_mod.auto_sync_interval() / 3600:g} hours. "
+            if sync_mod.auto_sync_interval()
+            else ""
+        )
+        + "Amounts are strings; negative means money left "
         "the account. Dates accept YYYY-MM-DD or relative values like 30d."
     ),
 )
@@ -80,6 +87,8 @@ def sync_now() -> dict:
     if not access_url:
         return {"error": "Not connected. The user must run `simplefin claim` in a terminal."}
     with db.session() as conn:
+        if sync_mod.recent_attempt(conn, 600):
+            return {"skipped": True, "reason": "Another sync started in the last 10 minutes; check sync_status shortly."}
         last = sync_mod.last_successful_sync(conn)
         if last and time.time() - last["finished_at"] < MIN_SYNC_INTERVAL:
             return {
@@ -97,4 +106,5 @@ def sync_now() -> dict:
 
 
 def run() -> None:
+    sync_mod.start_background_sync()
     mcp.run()

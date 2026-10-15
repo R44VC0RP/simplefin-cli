@@ -34,6 +34,21 @@ def require_access_url() -> str:
     return access_url
 
 
+def auto_sync(conn, args) -> None:
+    """Refresh stale data before a read, unless --no-sync. Never fails the read itself."""
+    if getattr(args, "no_sync", False) or not sync_mod.is_stale(conn) or not client.load_access_url():
+        return
+    print("Data is stale; syncing with SimpleFIN first (--no-sync to skip)...", file=sys.stderr)
+    try:
+        result = sync_mod.maybe_sync(conn)
+    except Exception as exc:
+        result = {"error": sanitize(exc)}
+    if result is None:
+        print("Skipped: a sync was attempted recently. Showing stored data.", file=sys.stderr)
+    elif "error" in result:
+        print(f"Auto-sync failed: {result['error'].rstrip('.')}. Showing stored data.", file=sys.stderr)
+
+
 def cmd_claim(args) -> int:
     if args.stdin:
         token = sys.stdin.read()
@@ -43,7 +58,9 @@ def cmd_claim(args) -> int:
         raise client.SimpleFINError("An access URL is already stored. Pass --replace to overwrite it.")
     access_url = client.claim_access_url(token)
     client.save_access_url(access_url)
-    print("Claimed. Access URL saved to the macOS Keychain (service: simplefin-cli).")
+    with db.session() as conn:
+        sync_mod.reset_lease(conn)
+    print("Claimed. Access URL saved to the system keychain (service: simplefin-cli).")
     print("Next: `simplefin sync` to pull accounts and transactions.")
     return 0
 
@@ -70,6 +87,7 @@ def cmd_sync(args) -> int:
 
 def cmd_accounts(args) -> int:
     with db.session() as conn:
+        auto_sync(conn, args)
         rows = queries.accounts(conn)
     emit(rows, args.json, lambda r: table(r, [
         ("institution", "Institution"), ("name", "Account"), ("balance", "Balance"),
@@ -80,6 +98,7 @@ def cmd_accounts(args) -> int:
 
 def cmd_transactions(args) -> int:
     with db.session() as conn:
+        auto_sync(conn, args)
         rows = queries.transactions(
             conn, account=args.account, since=args.since, until=args.until, search=args.search,
             min_amount=args.min, max_amount=args.max, pending=True if args.pending else None, limit=args.limit,
@@ -96,6 +115,7 @@ def cmd_transactions(args) -> int:
 
 def cmd_balances(args) -> int:
     with db.session() as conn:
+        auto_sync(conn, args)
         rows = queries.balance_history(conn, args.account, args.since)
     emit(rows, args.json, lambda r: table(r, [
         ("date", "Date"), ("account", "Account"), ("balance", "Balance"), ("available_balance", "Available"),
@@ -105,6 +125,7 @@ def cmd_balances(args) -> int:
 
 def cmd_summary(args) -> int:
     with db.session() as conn:
+        auto_sync(conn, args)
         result = queries.summary(conn, since=args.since, until=args.until, account=args.account)
     emit(result, args.json, lambda r: table(r["accounts"], [
         ("account", "Account"), ("transactions", "Count"), ("money_in", "In"), ("money_out", "Out"), ("currency", "Cur"),
@@ -123,6 +144,7 @@ def cmd_status(args) -> int:
         print(f"Transactions:     {r['transactions']}")
         print(f"Last sync:        {queries.iso(r['last_successful_sync']) or 'never'}")
         print(f"Requests (24h):   {r['requests_last_24h']} of {r['daily_budget']}")
+        print(f"Auto-sync:        {'every ' + format(r['auto_sync_hours'], 'g') + 'h when stale' if r['auto_sync_hours'] else 'off'}")
         for message in r["bridge_errors"]:
             print(f"Bridge error:     {message}")
 
@@ -162,9 +184,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--days", type=int, help="backfill this many days (one request per 45 days)")
     p.add_argument("--force", action="store_true", help="ignore the local daily request budget")
 
-    add("accounts", cmd_accounts, "list accounts and balances")
+    p = add("accounts", cmd_accounts, "list accounts and balances")
+    p.add_argument("--no-sync", action="store_true", help="don't auto-sync stale data first")
 
     p = add("transactions", cmd_transactions, "list transactions, newest first")
+    p.add_argument("--no-sync", action="store_true", help="don't auto-sync stale data first")
     p.add_argument("--account", help="account id or part of its name")
     p.add_argument("--since", default="30d", help="YYYY-MM-DD or e.g. 90d (default 30d)")
     p.add_argument("--until", help="YYYY-MM-DD, exclusive")
@@ -175,10 +199,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=100)
 
     p = add("balances", cmd_balances, "balance history recorded at each sync")
+    p.add_argument("--no-sync", action="store_true", help="don't auto-sync stale data first")
     p.add_argument("account", help="account id or part of its name")
     p.add_argument("--since")
 
     p = add("summary", cmd_summary, "money in and out per account")
+    p.add_argument("--no-sync", action="store_true", help="don't auto-sync stale data first")
     p.add_argument("--since", default="30d")
     p.add_argument("--until")
     p.add_argument("--account")

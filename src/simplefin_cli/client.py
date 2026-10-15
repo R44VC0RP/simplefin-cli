@@ -103,7 +103,12 @@ def save_access_url(access_url: str) -> None:
 
 
 def load_access_url() -> str | None:
-    return os.environ.get(ENV_ACCESS_URL) or keyring.get_password(KEYRING_SERVICE, KEYRING_ACCOUNT)
+    if os.environ.get(ENV_ACCESS_URL):
+        return os.environ[ENV_ACCESS_URL]
+    try:
+        return keyring.get_password(KEYRING_SERVICE, KEYRING_ACCOUNT)
+    except keyring.errors.KeyringError:
+        return None  # e.g. headless Linux without Secret Service: treat as not connected
 
 
 def delete_access_url() -> bool:

@@ -1,6 +1,7 @@
 import json
 import os
 import sqlite3
+import sys
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -60,6 +61,10 @@ CREATE TABLE IF NOT EXISTS requests (
     ok INTEGER NOT NULL,
     note TEXT
 );
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value INTEGER
+);
 CREATE TABLE IF NOT EXISTS sync_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at INTEGER NOT NULL,
@@ -80,7 +85,13 @@ def default_db_path() -> Path:
     override = os.environ.get("SIMPLEFIN_DB")
     if override:
         return Path(override).expanduser()
-    return Path.home() / "Library" / "Application Support" / "simplefin-cli" / "simplefin.db"
+    if sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    elif os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+    return base / "simplefin-cli" / "simplefin.db"
 
 
 def connect(path: Path | None = None) -> sqlite3.Connection:
@@ -88,7 +99,7 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     if not path.parent.exists():
         path.parent.mkdir(parents=True, mode=0o700)
     created = not path.exists()
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=30)
     if created:
         os.chmod(path, 0o600)
     conn.row_factory = sqlite3.Row

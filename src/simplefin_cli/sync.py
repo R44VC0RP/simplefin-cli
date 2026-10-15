@@ -1,5 +1,8 @@
 import json
+import os
 import sqlite3
+import sys
+import threading
 import time
 
 from . import client, db
@@ -8,6 +11,10 @@ DAY = 86400
 OVERLAP_DAYS = 5
 WINDOW_DAYS = 45  # Bridge allows 90 but warns above 45 and says it may cap there.
 DAILY_BUDGET = 20  # Bridge expects <=24 requests/day and disables tokens that keep exceeding it.
+DEFAULT_AUTO_SYNC_HOURS = 12
+# Minimum gap between automatic attempts across every process sharing the database, so failures
+# (or several MCP servers running at once) can't burn the quota: at most 8 auto attempts a day.
+AUTO_SYNC_RETRY_SECONDS = 3 * 3600
 
 
 class QuotaExceeded(client.SimpleFINError):
@@ -24,6 +31,89 @@ def last_complete_sync(conn: sqlite3.Connection) -> sqlite3.Row | None:
     return conn.execute(
         "SELECT * FROM sync_runs WHERE ok=1 AND complete=1 ORDER BY finished_at DESC LIMIT 1"
     ).fetchone()
+
+
+def auto_sync_interval() -> int:
+    """Seconds after which data counts as stale; 0 disables auto-sync. Env: SIMPLEFIN_AUTO_SYNC_HOURS."""
+    raw = os.environ.get("SIMPLEFIN_AUTO_SYNC_HOURS", "")
+    try:
+        hours = float(raw) if raw.strip() else DEFAULT_AUTO_SYNC_HOURS
+    except ValueError:
+        hours = DEFAULT_AUTO_SYNC_HOURS
+    return max(0, int(hours * 3600))
+
+
+def claim_sync_lease(conn: sqlite3.Connection, min_gap: int) -> bool:
+    """Atomically claim the right to sync if nobody claimed it in the last `min_gap` seconds."""
+    now = int(time.time())
+    conn.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('sync_lease', 0)")
+    claimed = conn.execute(
+        "UPDATE meta SET value=? WHERE key='sync_lease' AND value <= ?", (now, now - min_gap)
+    ).rowcount == 1
+    conn.commit()
+    return claimed
+
+
+def is_stale(conn: sqlite3.Connection, interval: int | None = None) -> bool:
+    interval = auto_sync_interval() if interval is None else interval
+    if interval <= 0:
+        return False
+    last = last_successful_sync(conn)
+    return last is None or time.time() - last["finished_at"] >= interval
+
+
+def maybe_sync(conn: sqlite3.Connection) -> dict | None:
+    """Sync if auto-sync is on, credentials exist, data is stale, and no recent attempt anywhere.
+
+    Returns the sync result, {"error": ...} on failure, or None when nothing was attempted.
+    """
+    if auto_sync_interval() <= 0 or not is_stale(conn):
+        return None
+    access_url = client.load_access_url()
+    if not access_url or not claim_sync_lease(conn, AUTO_SYNC_RETRY_SECONDS):
+        return None
+    try:
+        return sync(conn, access_url, _lease_held=True)
+    except (client.AccessRevoked, client.PaymentRequired) as exc:
+        # Won't fix itself: back off a day instead of retrying every few hours. `claim` resets this.
+        next_try = int(time.time()) + DAY
+        conn.execute("UPDATE meta SET value=? WHERE key='sync_lease'", (next_try - AUTO_SYNC_RETRY_SECONDS,))
+        conn.commit()
+        return {"error": client.sanitize(exc)}
+    except client.SimpleFINError as exc:
+        return {"error": client.sanitize(exc)}
+
+
+def recent_attempt(conn: sqlite3.Connection, within: int) -> bool:
+    """True if any process started (or is running) a sync in the last `within` seconds."""
+    row = conn.execute("SELECT value FROM meta WHERE key='sync_lease'").fetchone()
+    return bool(row and row[0] and 0 <= time.time() - row[0] < within)
+
+
+def reset_lease(conn: sqlite3.Connection) -> None:
+    conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('sync_lease', 0)")
+    conn.commit()
+
+
+def start_background_sync(check_every: int = 600) -> threading.Thread | None:
+    """Keep data fresh while a long-running process (the MCP server) is alive."""
+    if auto_sync_interval() <= 0:
+        return None
+
+    def loop() -> None:
+        while True:
+            try:
+                with db.session() as conn:
+                    result = maybe_sync(conn)
+                if result and "error" in result:
+                    print(f"simplefin auto-sync failed: {result['error']}", file=sys.stderr)
+            except Exception as exc:  # never let the thread die; retry on the next tick
+                print(f"simplefin auto-sync error: {client.sanitize(exc)}", file=sys.stderr)
+            time.sleep(check_every)
+
+    thread = threading.Thread(target=loop, name="simplefin-auto-sync", daemon=True)
+    thread.start()
+    return thread
 
 
 def plan_windows(conn: sqlite3.Connection, backfill_days: int | None) -> list[tuple[int, int]]:
@@ -54,6 +144,7 @@ def sync(
     *,
     backfill_days: int | None = None,
     force: bool = False,
+    _lease_held: bool = False,
 ) -> dict:
     windows = plan_windows(conn, backfill_days)
     used = db.requests_last_24h(conn)
@@ -64,6 +155,9 @@ def sync(
             "Try later, or pass --force."
         )
 
+    if not _lease_held:
+        # Manual syncs always run, but they push back automatic ones in other processes.
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('sync_lease', ?)", (int(time.time()),))
     started = int(time.time())
     run_id = conn.execute(
         "INSERT INTO sync_runs (started_at, window_start, window_end) VALUES (?, ?, ?)",
@@ -133,6 +227,7 @@ def status(conn: sqlite3.Connection) -> dict:
         "last_successful_sync": last["finished_at"] if last else None,
         "last_attempt": dict(last_attempt) if last_attempt else None,
         "requests_last_24h": db.requests_last_24h(conn),
+        "auto_sync_hours": auto_sync_interval() / 3600,
         "daily_budget": DAILY_BUDGET,
         "bridge_errors": json.loads(last["errors"]) if last and last["errors"] else [],
     }

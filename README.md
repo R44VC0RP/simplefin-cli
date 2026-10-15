@@ -4,11 +4,11 @@
 
 Read-only access to your bank, card and loan accounts through [SimpleFIN Bridge](https://bridge.simplefin.org), as a CLI and an MCP server for agents.
 
-Data is synced into a local SQLite database, and every query reads that copy. Only `sync` talks to SimpleFIN, which allows about 24 requests a day and disables access tokens that keep going over.
+Data is synced into a local SQLite database, and every query reads that copy. Syncing happens automatically (see [Auto-sync](#auto-sync)), within SimpleFIN's limit of about 24 requests a day; it disables access tokens that keep going over. Works on macOS, Linux and Windows.
 
 ## Setup
 
-1. **Install** (needs [uv](https://docs.astral.sh/uv/) and macOS for the Keychain):
+1. **Install** (needs [uv](https://docs.astral.sh/uv/)):
 
    ```sh
    uv tool install git+https://github.com/R44VC0RP/simplefin-cli
@@ -20,7 +20,7 @@ Data is synced into a local SQLite database, and every query reads that copy. On
    simplefin claim
    ```
 
-   The token works once. The access URL it returns is saved to the macOS Keychain and never printed.
+   The token works once. The access URL it returns is saved to the system keychain (macOS Keychain, Windows Credential Manager, or Secret Service on Linux) and never printed.
 
 3. **Load history:**
 
@@ -38,12 +38,22 @@ Data is synced into a local SQLite database, and every query reads that copy. On
    | Codex (`~/.codex/config.toml`) | `[mcp_servers.simplefin]`<br>`command = "simplefin"`<br>`args = ["mcp"]` |
    | Anything else | stdio server, command `simplefin mcp` |
 
-5. **Keep it fresh.** Run `simplefin sync` once or twice a day (cron, launchd or similar), at a random minute rather than on the hour.
+That's it. Data stays fresh on its own; no cron job needed.
+
+## Auto-sync
+
+Built in, on every OS, with no scheduler:
+
+- **MCP server:** while it runs, it checks every 10 minutes and syncs when data is older than 12 hours.
+- **CLI:** `accounts`, `transactions`, `summary` and `balances` sync first when data is stale. Pass `--no-sync` to skip.
+- **Quota-safe:** every process shares one lease in the database, so several agents or terminals at once still make one request, and failed attempts retry at most every 3 hours. `sync_now` also skips if any sync started in the last 10 minutes.
+
+Set `SIMPLEFIN_AUTO_SYNC_HOURS` to change the 12 hours (values under 3 still wait 3 hours between attempts), or `0` to turn it off. If SimpleFIN rejects the access URL or needs payment, auto-sync pauses for a day; `simplefin claim` resets it.
 
 ## Rules for agents
 
 - Never ask the user to paste a setup token or access URL into chat. If `status` says not connected, tell them to run `simplefin claim` themselves.
-- Read with the query tools; they're free. Call `sync_now` / `simplefin sync` only when `sync_status` shows data older than about a day. Never loop on it.
+- Read with the query tools; they're free. Auto-sync keeps data within 12 hours, so you rarely need `sync_now`. Never loop on it.
 - Amounts are signed strings: positive means money into the account, negative means money out. Card purchases are usually negative; check a known one before assuming.
 - Show Bridge errors (from `sync_status`) to the user. They usually mean a bank needs reconnecting at bridge.simplefin.org.
 
@@ -65,12 +75,12 @@ Every command accepts `--json`.
 ```sh
 simplefin status                                 # connected? last sync, quota used
 simplefin sync [--days N] [--force]              # --force skips the local 20/day budget
-simplefin accounts
+simplefin accounts                               # read commands auto-sync stale data; --no-sync to skip
 simplefin transactions [--account chase] [--since 30d] [--until 2026-10-01]
                        [--search uber] [--min -500] [--max -100] [--pending] [--limit 100]
 simplefin summary [--since 30d] [--account chase]
 simplefin balances <account> [--since 90d]
-simplefin logout                                 # removes the Keychain entry
+simplefin logout                                 # removes the stored access URL
 simplefin mcp                                    # MCP server over stdio
 ```
 
@@ -78,7 +88,8 @@ simplefin mcp                                    # MCP server over stdio
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `SIMPLEFIN_DB` | `~/Library/Application Support/simplefin-cli/simplefin.db` | Database location |
-| `SIMPLEFIN_ACCESS_URL` | Keychain | Use this access URL instead of the Keychain (for CI or other machines; treat it as a password) |
+| `SIMPLEFIN_DB` | macOS `~/Library/Application Support/simplefin-cli/`, Linux `~/.local/share/simplefin-cli/`, Windows `%LOCALAPPDATA%\simplefin-cli\` (file `simplefin.db`) | Database location |
+| `SIMPLEFIN_AUTO_SYNC_HOURS` | `12` | Sync when data is older than this; `0` turns auto-sync off |
+| `SIMPLEFIN_ACCESS_URL` | system keychain | Use this access URL instead of the keychain (for CI or other machines; treat it as a password) |
 
 To revoke access, run `simplefin logout` and disable the app connection at bridge.simplefin.org.
