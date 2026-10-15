@@ -53,7 +53,8 @@ CREATE TABLE IF NOT EXISTS transactions (
     last_seen INTEGER NOT NULL,
     PRIMARY KEY (account_id, id)
 );
-CREATE INDEX IF NOT EXISTS transactions_by_date ON transactions (COALESCE(NULLIF(posted, 0), transacted_at));
+DROP INDEX IF EXISTS transactions_by_date;
+CREATE INDEX IF NOT EXISTS transactions_by_tx_date ON transactions (COALESCE(NULLIF(posted, 0), transacted_at, first_seen));
 CREATE TABLE IF NOT EXISTS requests (
     at INTEGER NOT NULL,
     ok INTEGER NOT NULL,
@@ -66,6 +67,7 @@ CREATE TABLE IF NOT EXISTS sync_runs (
     window_start INTEGER,
     window_end INTEGER,
     ok INTEGER NOT NULL DEFAULT 0,
+    complete INTEGER NOT NULL DEFAULT 0,
     accounts INTEGER,
     transactions_new INTEGER,
     transactions_updated INTEGER,
@@ -83,13 +85,18 @@ def default_db_path() -> Path:
 
 def connect(path: Path | None = None) -> sqlite3.Connection:
     path = path or default_db_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(path.parent, 0o700)
+    if not path.parent.exists():
+        path.parent.mkdir(parents=True, mode=0o700)
+    created = not path.exists()
     conn = sqlite3.connect(path)
-    os.chmod(path, 0o600)
+    if created:
+        os.chmod(path, 0o600)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(sync_runs)")}
+    if "complete" not in columns:
+        conn.execute("ALTER TABLE sync_runs ADD COLUMN complete INTEGER NOT NULL DEFAULT 0")
     return conn
 
 
@@ -109,8 +116,15 @@ def to_cents(amount: str) -> int:
         return 0
 
 
-def log_request(conn: sqlite3.Connection, ok: bool, note: str = "") -> None:
-    conn.execute("INSERT INTO requests (at, ok, note) VALUES (?, ?, ?)", (int(time.time()), int(ok), note))
+def begin_request(conn: sqlite3.Connection) -> int:
+    """Record a request before sending it, so failures mid-flight still count against the quota."""
+    row_id = conn.execute("INSERT INTO requests (at, ok) VALUES (?, 0)", (int(time.time()),)).lastrowid
+    conn.commit()
+    return row_id
+
+
+def finish_request(conn: sqlite3.Connection, row_id: int, ok: bool, note: str = "") -> None:
+    conn.execute("UPDATE requests SET ok=?, note=? WHERE rowid=?", (int(ok), note, row_id))
     conn.commit()
 
 
@@ -119,10 +133,27 @@ def requests_last_24h(conn: sqlite3.Connection) -> int:
     return row[0]
 
 
+def problem_scopes(data: dict) -> tuple[set[str], set[str]]:
+    """Account and connection ids the Bridge reported act./con. errors for."""
+    accounts, connections = set(), set()
+    for e in data.get("errlist") or []:
+        code = str(e.get("code") or "")
+        if code.startswith("act.") and e.get("account_id"):
+            accounts.add(e["account_id"])
+        elif code.startswith("con.") and e.get("conn_id"):
+            connections.add(e["conn_id"])
+    return accounts, connections
+
+
+def has_data_errors(data: dict) -> bool:
+    return any(str(e.get("code") or "").startswith(("act.", "con.")) for e in data.get("errlist") or [])
+
+
 def store_account_set(conn: sqlite3.Connection, data: dict, window: tuple[int, int] | None) -> dict:
     """Upsert one /accounts response. Returns counts of new and updated transactions."""
     now = int(time.time())
     new = updated = 0
+    bad_accounts, bad_connections = problem_scopes(data)
 
     for c in data.get("connections") or []:
         conn.execute(
@@ -144,8 +175,7 @@ def store_account_set(conn: sqlite3.Connection, data: dict, window: tuple[int, i
                  currency=excluded.currency, balance=excluded.balance,
                  available_balance=excluded.available_balance, balance_date=excluded.balance_date,
                  extra=excluded.extra, updated_at=excluded.updated_at
-               WHERE excluded.balance_date IS NULL OR accounts.balance_date IS NULL
-                 OR excluded.balance_date >= accounts.balance_date""",
+               WHERE accounts.balance_date IS NULL OR excluded.balance_date >= accounts.balance_date""",
             (
                 account_id, conn_id, a.get("name") or account_id, a.get("currency"), a.get("balance"),
                 a.get("available-balance"), a.get("balance-date"),
@@ -192,13 +222,14 @@ def store_account_set(conn: sqlite3.Connection, data: dict, window: tuple[int, i
 
         # A pending transaction usually reappears under a new id once it posts, so pending rows
         # in the fetched window that the server no longer returns are stale.
-        if window is not None:
+        if window is not None and account_id not in bad_accounts and conn_id not in bad_connections:
             placeholders = ",".join("?" * len(seen_ids)) or "NULL"
             conn.execute(
                 f"""DELETE FROM transactions WHERE account_id=? AND pending=1
                     AND COALESCE(NULLIF(posted, 0), transacted_at, first_seen) >= ?
+                    AND COALESCE(NULLIF(posted, 0), transacted_at, first_seen) < ?
                     AND id NOT IN ({placeholders})""",
-                (account_id, window[0], *seen_ids),
+                (account_id, window[0], window[1], *seen_ids),
             )
 
     conn.commit()

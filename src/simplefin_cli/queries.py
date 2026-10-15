@@ -1,6 +1,8 @@
 import datetime as dt
 import sqlite3
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+
+from .client import SimpleFINError
 
 TX_DATE = "COALESCE(NULLIF(t.posted, 0), t.transacted_at, t.first_seen)"
 
@@ -12,7 +14,10 @@ def parse_date(value: str | None) -> int | None:
     value = value.strip()
     if value.endswith("d") and value[:-1].isdigit():
         return int((dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=int(value[:-1]))).timestamp())
-    parsed = dt.datetime.fromisoformat(value)
+    try:
+        parsed = dt.datetime.fromisoformat(value)
+    except ValueError:
+        raise SimpleFINError(f"Invalid date {value!r}: use YYYY-MM-DD or e.g. 30d") from None
     if parsed.tzinfo is None:
         parsed = parsed.astimezone()
     return int(parsed.timestamp())
@@ -44,6 +49,13 @@ def accounts(conn: sqlite3.Connection) -> list[dict]:
         }
         for r in rows
     ]
+
+
+def to_cents(value: str) -> int:
+    try:
+        return int(Decimal(value) * 100)
+    except InvalidOperation:
+        raise SimpleFINError(f"Invalid amount {value!r}") from None
 
 
 def resolve_account_ids(conn: sqlite3.Connection, account: str | None) -> list[str] | None:
@@ -86,10 +98,10 @@ def transactions(
         params += [f"%{search}%"] * 3
     if min_amount is not None:
         where.append("t.amount_cents >= ?")
-        params.append(int(Decimal(min_amount) * 100))
+        params.append(to_cents(min_amount))
     if max_amount is not None:
         where.append("t.amount_cents <= ?")
-        params.append(int(Decimal(max_amount) * 100))
+        params.append(to_cents(max_amount))
     if pending is not None:
         where.append("t.pending = ?")
         params.append(int(pending))

@@ -20,16 +20,25 @@ def last_successful_sync(conn: sqlite3.Connection) -> sqlite3.Row | None:
     ).fetchone()
 
 
+def last_complete_sync(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM sync_runs WHERE ok=1 AND complete=1 ORDER BY finished_at DESC LIMIT 1"
+    ).fetchone()
+
+
 def plan_windows(conn: sqlite3.Connection, backfill_days: int | None) -> list[tuple[int, int]]:
     now = int(time.time())
     end = now + DAY
-    last = last_successful_sync(conn)
     if backfill_days is not None:
+        if backfill_days < 1:
+            raise client.SimpleFINError("--days must be at least 1")
         start = now - backfill_days * DAY
-    elif last is not None:
-        start = last["finished_at"] - OVERLAP_DAYS * DAY
+    elif (last := last_complete_sync(conn)) is not None:
+        # Resume from the last sync with no account/connection errors, so gaps get re-fetched,
+        # but never reach back more than two windows on a routine sync.
+        start = max(last["finished_at"] - OVERLAP_DAYS * DAY, end - 2 * WINDOW_DAYS * DAY)
     else:
-        start = now - WINDOW_DAYS * DAY
+        start = end - WINDOW_DAYS * DAY
     windows = []
     cursor = end
     while cursor > start:
@@ -64,15 +73,18 @@ def sync(
 
     totals = {"new": 0, "updated": 0}
     errors: list[str] = []
+    complete = True
     accounts: set[str] = set()
     try:
         for window_start, window_end in windows:
+            request_id = db.begin_request(conn)
             try:
                 data = client.fetch_accounts(access_url, start_date=window_start, end_date=window_end)
-            except client.SimpleFINError as exc:
-                db.log_request(conn, False, type(exc).__name__)
+            except BaseException as exc:
+                db.finish_request(conn, request_id, False, type(exc).__name__)
                 raise
-            db.log_request(conn, True)
+            db.finish_request(conn, request_id, True)
+            complete = complete and not db.has_data_errors(data)
             counts = db.store_account_set(conn, data, (window_start, window_end))
             totals["new"] += counts["new"]
             totals["updated"] += counts["updated"]
@@ -90,9 +102,9 @@ def sync(
 
     finished = int(time.time())
     conn.execute(
-        """UPDATE sync_runs SET finished_at=?, ok=1, accounts=?, transactions_new=?,
+        """UPDATE sync_runs SET finished_at=?, ok=1, complete=?, accounts=?, transactions_new=?,
              transactions_updated=?, errors=? WHERE id=?""",
-        (finished, len(accounts), totals["new"], totals["updated"], json.dumps(errors), run_id),
+        (finished, int(complete), len(accounts), totals["new"], totals["updated"], json.dumps(errors), run_id),
     )
     conn.commit()
     return {
@@ -102,6 +114,7 @@ def sync(
         "accounts": len(accounts),
         "transactions_new": totals["new"],
         "transactions_updated": totals["updated"],
+        "complete": complete,
         "errors": errors,
     }
 

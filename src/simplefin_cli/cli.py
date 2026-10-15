@@ -4,6 +4,7 @@ import json
 import sys
 
 from . import client, db, queries
+from .client import sanitize
 from . import sync as sync_mod
 
 
@@ -18,7 +19,7 @@ def table(rows: list[dict], columns: list[tuple[str, str]]) -> None:
     if not rows:
         print("(none)")
         return
-    cells = [[str(r.get(key) if r.get(key) is not None else "") for key, _ in columns] for r in rows]
+    cells = [[sanitize(r.get(key) if r.get(key) is not None else "") for key, _ in columns] for r in rows]
     widths = [max(len(title), *(len(c[i]) for c in cells)) for i, (_, title) in enumerate(columns)]
     widths = [min(w, 48) for w in widths]
     print("  ".join(title.ljust(widths[i]) for i, (_, title) in enumerate(columns)))
@@ -60,6 +61,8 @@ def cmd_sync(args) -> int:
         )
         for message in r["errors"]:
             print(f"Bridge: {message}", file=sys.stderr)
+        if not r["complete"]:
+            print("Some accounts reported errors; the next sync will re-fetch this period.", file=sys.stderr)
 
     emit(result, args.json, render)
     return 0
@@ -156,7 +159,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--replace", action="store_true", help="overwrite an existing stored access URL")
 
     p = add("sync", cmd_sync, "fetch new data from SimpleFIN Bridge (uses the ~24/day quota)")
-    p.add_argument("--days", type=int, help="backfill this many days (split into 90-day requests)")
+    p.add_argument("--days", type=int, help="backfill this many days (one request per 45 days)")
     p.add_argument("--force", action="store_true", help="ignore the local daily request budget")
 
     add("accounts", cmd_accounts, "list accounts and balances")

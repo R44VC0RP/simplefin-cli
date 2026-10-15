@@ -1,5 +1,6 @@
 import base64
 import binascii
+import http.client
 import json
 import os
 import re
@@ -147,11 +148,11 @@ def fetch_accounts(
     credentials = f"{urllib.parse.unquote(parts.username)}:{urllib.parse.unquote(parts.password)}"
     request = urllib.request.Request(
         url,
-        headers={
-            "Authorization": "Basic " + base64.b64encode(credentials.encode()).decode(),
-            "Accept": "application/json",
-            "User-Agent": USER_AGENT,
-        },
+        headers={"Accept": "application/json", "User-Agent": USER_AGENT},
+    )
+    # Unredirected so a redirect can never carry the credentials to another host or to plain HTTP.
+    request.add_unredirected_header(
+        "Authorization", "Basic " + base64.b64encode(credentials.encode()).decode()
     )
     try:
         with urllib.request.urlopen(
@@ -170,5 +171,7 @@ def fetch_accounts(
         raise SimpleFINError(f"GET /accounts failed with HTTP {exc.code}") from None
     except urllib.error.URLError as exc:
         raise SimpleFINError(f"GET /accounts failed: {sanitize(exc.reason)}") from None
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         raise SimpleFINError("SimpleFIN returned invalid JSON") from None
+    except (OSError, http.client.HTTPException) as exc:
+        raise SimpleFINError(f"GET /accounts failed: {type(exc).__name__}") from None
