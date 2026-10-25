@@ -9,6 +9,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import certifi
 import keyring
 
 KEYRING_SERVICE = "simplefin-cli"
@@ -40,6 +41,12 @@ class PaymentRequired(SimpleFINError):
 
 def sanitize(text: object) -> str:
     return _CONTROL_CHARS.sub(" ", str(text)).strip()
+
+
+def _tls_context() -> ssl.SSLContext:
+    # certifi, not the OS bundle: macOS /etc/ssl/cert.pem still trusts the compromised eMudhra
+    # emSign roots, and Python's ssl module does not check revocation.
+    return ssl.create_default_context(cafile=certifi.where())
 
 
 def _require_https(url: str) -> urllib.parse.SplitResult:
@@ -77,7 +84,7 @@ def claim_access_url(token: str) -> str:
     )
     try:
         with urllib.request.urlopen(
-            request, timeout=TIMEOUT_SECONDS, context=ssl.create_default_context()
+            request, timeout=TIMEOUT_SECONDS, context=_tls_context()
         ) as response:
             access_url = response.read().decode().strip()
     except urllib.error.HTTPError as exc:
@@ -161,7 +168,7 @@ def fetch_accounts(
     )
     try:
         with urllib.request.urlopen(
-            request, timeout=TIMEOUT_SECONDS, context=ssl.create_default_context()
+            request, timeout=TIMEOUT_SECONDS, context=_tls_context()
         ) as response:
             return json.loads(response.read().decode())
     except urllib.error.HTTPError as exc:

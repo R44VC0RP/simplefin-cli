@@ -7,7 +7,7 @@ name = "simplefin-cli"
 version = "0.1.0"
 description = "Local SimpleFIN Bridge sync with a CLI and an MCP server for agents"
 requires-python = ">=3.11"
-dependencies = ["keyring>=25,<26", "mcp>=1.9,<2"]
+dependencies = ["certifi>=2026.10.19", "keyring>=25,<26", "mcp>=1.9,<2"]
 
 [project.scripts]
 simplefin = "simplefin_cli.cli:main"
