@@ -69,7 +69,10 @@ def maybe_sync(conn: sqlite3.Connection) -> dict | None:
     """
     if auto_sync_interval() <= 0 or not is_stale(conn):
         return None
-    access_url = client.load_access_url()
+    try:
+        access_url = client.load_access_url()
+    except client.KeychainError as exc:
+        return {"error": client.sanitize(exc)}
     if not access_url or not claim_sync_lease(conn, AUTO_SYNC_RETRY_SECONDS):
         return None
     try:
@@ -219,8 +222,13 @@ def status(conn: sqlite3.Connection) -> dict:
     counts = conn.execute(
         "SELECT (SELECT COUNT(*) FROM accounts), (SELECT COUNT(*) FROM transactions)"
     ).fetchone()
+    try:
+        access_configured, access_error = client.load_access_url() is not None, None
+    except client.KeychainError as exc:
+        access_configured, access_error = None, client.sanitize(exc)
     return {
-        "access_configured": client.load_access_url() is not None,
+        "access_configured": access_configured,
+        **({"access_error": access_error} if access_error else {}),
         "database": str(db.default_db_path()),
         "accounts": counts[0],
         "transactions": counts[1],

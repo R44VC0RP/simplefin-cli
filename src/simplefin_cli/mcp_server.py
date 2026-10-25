@@ -117,7 +117,10 @@ def sync_status() -> dict:
 @mcp.tool()
 def sync_now() -> dict:
     """Fetch new data from SimpleFIN Bridge. Refuses if the last sync was under an hour ago."""
-    access_url = client.load_access_url()
+    try:
+        access_url = client.load_access_url()
+    except client.KeychainError as exc:
+        return {"error": client.sanitize(exc)}
     if not access_url:
         return {"error": "Not connected. The user must run `simplefin claim` in a terminal."}
     with db.session() as conn:
