@@ -5,6 +5,8 @@ import json
 import os
 import re
 import ssl
+import subprocess
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -97,14 +99,43 @@ def claim_access_url(token: str) -> str:
     return access_url
 
 
+# On macOS the Keychain ACL pins the calling binary. uv's ad-hoc signed Python changes on every
+# patch upgrade, which re-triggers the access prompt. Apple's signed `security` tool stays stable.
+_SECURITY = "/usr/bin/security"
+_USE_SECURITY_CLI = sys.platform == "darwin" and os.path.exists(_SECURITY)
+
+
+def _security(args: list[str], stdin: str | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run([_SECURITY, *args], input=stdin, capture_output=True, text=True)
+
+
 def save_access_url(access_url: str) -> None:
     _require_https(access_url)
-    keyring.set_password(KEYRING_SERVICE, KEYRING_ACCOUNT, access_url)
+    if not _USE_SECURITY_CLI:
+        keyring.set_password(KEYRING_SERVICE, KEYRING_ACCOUNT, access_url)
+        return
+    if any(c in access_url for c in '"\\') or _CONTROL_CHARS.search(access_url):
+        raise SimpleFINError("Access URL contains characters the Keychain tool cannot store")
+    # Replace rather than update: `-U` with `-T` rewrites the ACL, which needs user approval.
+    delete_access_url()
+    # `security -i` reads the command from stdin, so the secret never appears in the process list.
+    command = (
+        f'add-generic-password -s "{KEYRING_SERVICE}" -a "{KEYRING_ACCOUNT}" '
+        f'-T "{_SECURITY}" -w "{access_url}"\n'
+    )
+    result = _security(["-i"], stdin=command)
+    if result.returncode != 0 or result.stderr.strip():
+        raise SimpleFINError(f"Saving to Keychain failed: {sanitize(result.stderr)}")
 
 
 def load_access_url() -> str | None:
     if os.environ.get(ENV_ACCESS_URL):
         return os.environ[ENV_ACCESS_URL]
+    if _USE_SECURITY_CLI:
+        result = _security(["find-generic-password", "-s", KEYRING_SERVICE, "-a", KEYRING_ACCOUNT, "-w"])
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip() or None
     try:
         return keyring.get_password(KEYRING_SERVICE, KEYRING_ACCOUNT)
     except keyring.errors.KeyringError:
@@ -112,6 +143,9 @@ def load_access_url() -> str | None:
 
 
 def delete_access_url() -> bool:
+    if _USE_SECURITY_CLI:
+        result = _security(["delete-generic-password", "-s", KEYRING_SERVICE, "-a", KEYRING_ACCOUNT])
+        return result.returncode == 0
     try:
         keyring.delete_password(KEYRING_SERVICE, KEYRING_ACCOUNT)
     except keyring.errors.PasswordDeleteError:
